@@ -4,6 +4,7 @@
   const state = window.RishNovaStorage.state;
   const chat = window.RishNovaChat;
   const ui = window.RishNovaUI;
+  const appShell = document.getElementById('app-shell');
   const conversationList = document.getElementById('conversation-list');
   const projectList = document.getElementById('project-list');
   const searchInput = document.getElementById('conversation-search');
@@ -15,7 +16,13 @@
   let isAdmin = false;
   let stagedFiles = [];
   let speechRecognition = null;
+  let workspaceLoading = false;
+  let workspaceGeneration = 0;
+  let workspaceUserId = null;
   let sortNewestFirst = state.sortNewestFirst;
+  let backendStatusRequest = null;
+  let backendStatusTimer = null;
+  let backendRetryDelay = 2000;
 
   function persist() {
     if (!window.RishNovaStorage.save()) ui.showToast('Could not save changes on this device.', 'error');
@@ -26,16 +33,24 @@
     return Number.isFinite(timestamp) ? timestamp : Date.now();
   }
 
-  async function loadRemoteConversations() {
+  function isCurrentWorkspace(generation, userId) {
+    const user = window.RishNovaAuth.getUser();
+    return generation === workspaceGeneration && Boolean(user) && user.id === userId;
+  }
+
+  async function loadRemoteConversations(generation, userId) {
     const response = await window.RishNovaApi.getConversations();
+    if (!isCurrentWorkspace(generation, userId)) return;
+    const conversationMetadata = window.RishNovaStorage.getConversationMetadata(userId);
     state.conversations = response.conversations.map(function (item) {
+      const metadata = conversationMetadata[item.id] || {};
       return {
         id: item.id,
         title: item.title,
         createdAt: toTimestamp(item.created_at),
         updatedAt: toTimestamp(item.updated_at),
-        pinned: Boolean(item.pinned),
-        project: item.project || null,
+        pinned: Boolean(metadata.pinned),
+        project: metadata.project || null,
         model: item.model,
         remote: true,
         loaded: false,
@@ -43,19 +58,22 @@
       };
     });
     const remoteProjects = state.conversations.map(function (item) { return item.project; }).filter(Boolean);
-    state.projects = Array.from(new Set(state.projects.concat(remoteProjects)));
+    state.projects = Array.from(new Set(state.projects.concat(['Personal', 'Product ideas'], remoteProjects)));
     if (!state.conversations.some(function (item) { return item.id === state.activeId; })) {
       state.activeId = state.conversations.length ? state.conversations[0].id : null;
     }
-    if (state.activeId) await loadConversationMessages(state.activeId);
+    if (state.activeId) await loadConversationMessages(state.activeId, generation, userId);
+    if (!isCurrentWorkspace(generation, userId)) return;
     persist();
     renderAll();
   }
 
-  async function loadConversationMessages(id) {
+  async function loadConversationMessages(id, generation, userId) {
     const conversation = state.conversations.find(function (item) { return item.id === id; });
     if (!conversation || !conversation.remote || conversation.loaded) return;
     const response = await window.RishNovaApi.getMessages(id);
+    if (generation !== undefined && !isCurrentWorkspace(generation, userId)) return;
+    if (!state.conversations.includes(conversation)) return;
     conversation.messages = response.messages.map(function (message) {
       return {
         id: message.id,
@@ -69,8 +87,9 @@
     conversation.loaded = true;
   }
 
-  async function loadProfile() {
+  async function loadProfile(generation, userId) {
     const profile = await window.RishNovaApi.getProfile();
+    if (!isCurrentWorkspace(generation, userId)) return;
     const user = window.RishNovaAuth.getUser();
     isAdmin = profile.is_admin === true;
     const userMetadata = user && user.user_metadata;
@@ -80,24 +99,22 @@
     document.getElementById('profile-avatar').textContent = Array.from(displayName.trim())[0] || 'U';
   }
 
-  async function loadUsage() {
+  async function loadUsage(generation, userId) {
     const usage = await window.RishNovaApi.getUsage();
+    if (!isCurrentWorkspace(generation, userId)) return;
     if (Number.isFinite(usage.daily_remaining)) {
       document.getElementById('usage-indicator').textContent = usage.daily_remaining + ' AI requests left today';
     }
   }
 
   async function enterWorkspace() {
-    try {
-      await Promise.all([loadProfile(), loadRemoteConversations(), loadUsage()]);
-      await refreshBackendStatus();
-    } catch (error) {
-      console.error('Could not load the signed-in workspace:', error);
-      ui.showToast(error.message || 'Could not load your account data.', 'error');
-    }
-  }
-
-  function clearSignedOutWorkspace() {
+    const authenticatedUser = window.RishNovaAuth.getUser();
+    if (!authenticatedUser) return;
+    if (workspaceLoading && workspaceUserId === authenticatedUser.id) return;
+    const generation = ++workspaceGeneration;
+    const userId = authenticatedUser.id;
+    workspaceLoading = true;
+    workspaceUserId = userId;
     state.conversations = [];
     state.activeId = null;
     state.currentProject = null;
@@ -106,17 +123,64 @@
     document.getElementById('profile-name').textContent = 'Your account';
     document.getElementById('profile-email').textContent = 'Personal workspace';
     document.getElementById('profile-avatar').textContent = 'U';
+    document.getElementById('usage-indicator').textContent = 'Daily usage is limited';
+    chat.clearSensitiveState();
+    appShell.hidden = true;
+    messageInput.value = '';
+    stagedFiles = [];
+    updateAttachmentPreview();
+    renderAll();
+    try {
+      await Promise.all([
+        loadProfile(generation, userId),
+        loadRemoteConversations(generation, userId),
+        loadUsage(generation, userId)
+      ]);
+      if (isCurrentWorkspace(generation, userId)) {
+        await refreshBackendStatus();
+        if (isCurrentWorkspace(generation, userId)) appShell.hidden = false;
+      }
+    } catch (error) {
+      if (!isCurrentWorkspace(generation, userId)) return;
+      state.conversations = [];
+      state.activeId = null;
+      state.projects = ['Personal', 'Product ideas'];
+      chat.clearSensitiveState();
+      renderAll();
+      appShell.hidden = false;
+      console.error('Could not load the signed-in workspace:', error);
+      ui.showToast(error.message || 'Could not load your account data.', 'error');
+    } finally {
+      if (generation === workspaceGeneration) workspaceLoading = false;
+    }
+  }
+
+  function clearSignedOutWorkspace() {
+    workspaceGeneration += 1;
+    workspaceLoading = false;
+    workspaceUserId = null;
+    state.conversations = [];
+    state.activeId = null;
+    state.currentProject = null;
+    state.projects = ['Personal', 'Product ideas'];
+    chat.clearSensitiveState();
+    messageInput.value = '';
+    stagedFiles = [];
+    updateAttachmentPreview();
+    isAdmin = false;
+    document.getElementById('profile-name').textContent = 'Your account';
+    document.getElementById('profile-email').textContent = 'Personal workspace';
+    document.getElementById('profile-avatar').textContent = 'U';
+    document.getElementById('usage-indicator').textContent = 'Daily usage is limited';
     persist();
     renderAll();
   }
 
   async function saveConversationChanges(conversation, changes) {
     if (!conversation.remote) return;
-    try {
-      await window.RishNovaApi.updateConversation(conversation.id, changes);
-    } catch (error) {
-      ui.showToast(error.message || 'Could not save the conversation.', 'error');
-    }
+    const saved = await window.RishNovaApi.updateConversation(conversation.id, changes);
+    conversation.updatedAt = toTimestamp(saved.updated_at);
+    return saved;
   }
 
   function closeProfileMenu() {
@@ -287,8 +351,8 @@
 
   function renderModelMenus() {
     const current = chat.selectedModel();
-    document.getElementById('header-model-name').textContent = current ? current.name : 'No local models';
-    document.getElementById('composer-model-name').textContent = current ? current.name : 'No local models';
+    document.getElementById('header-model-name').textContent = current ? current.name : 'No available models';
+    document.getElementById('composer-model-name').textContent = current ? current.name : 'No available models';
     document.getElementById('header-model-trigger').disabled = chat.models.length === 0;
     document.getElementById('composer-model-trigger').disabled = chat.models.length === 0;
     ['header-model-menu', 'composer-model-menu'].forEach(function (menuId) {
@@ -297,7 +361,7 @@
       if (!chat.models.length) {
         const empty = document.createElement('div');
         empty.className = 'model-menu-empty';
-        empty.textContent = 'No supported Qwen models are installed in Ollama.';
+        empty.textContent = 'No supported Qwen models are available from the AI service.';
         menu.appendChild(empty);
         return;
       }
@@ -349,42 +413,74 @@
     dot.classList.add(status);
     serviceIndicator.classList.add(status);
     document.getElementById('connection-label').textContent = label;
-    document.getElementById('service-label').textContent = status === 'online' ? 'Connected to local Ollama' : status === 'connecting' ? 'Connecting to local AI' : 'Local AI unavailable';
+    document.getElementById('service-label').textContent = status === 'online'
+      ? 'Connected to AI service'
+      : status === 'connecting'
+        ? 'Connecting to AI service'
+        : 'AI server offline. It may be asleep or disconnected; retrying automatically.';
   }
 
-  async function refreshBackendStatus() {
+  function scheduleBackendStatusCheck(delay) {
+    if (backendStatusTimer) window.clearTimeout(backendStatusTimer);
     if (!window.RishNovaAuth.isAuthenticated()) return;
-    setConnectionStatus('connecting', 'Checking local AI...');
-    try {
-      const health = await window.RishNovaApi.getHealth();
-      if (!health.ollama_available || health.status !== 'online') {
-        chat.setAvailableModels([]);
-        setConnectionStatus('offline', 'Ollama offline');
-        renderModelMenus();
-        return;
-      }
-      const response = await window.RishNovaApi.getAvailableModels();
-      const models = Array.isArray(response.models) ? response.models : [];
-      chat.setAvailableModels(models);
-      if (models.length) {
-        if (!models.some(function (model) { return model.name === state.selectedModel; })) {
-          state.selectedModel = models.some(function (model) { return model.name === response.default_model; })
-            ? response.default_model
-            : models[0].name;
-          persist();
-        }
-        setConnectionStatus('online', 'Ollama connected');
-      } else {
-        setConnectionStatus('online', 'Ollama online · no supported model installed');
-        document.getElementById('service-label').textContent = 'Install a supported Qwen model to chat';
-      }
-      renderModelMenus();
-    } catch (error) {
-      chat.setAvailableModels([]);
-      setConnectionStatus('offline', 'Backend or Ollama offline');
-      renderModelMenus();
-      console.error('Could not discover local models:', error);
+    backendStatusTimer = window.setTimeout(function () {
+      backendStatusTimer = null;
+      refreshBackendStatus();
+    }, delay);
+  }
+
+  function refreshBackendStatus() {
+    if (!window.RishNovaAuth.isAuthenticated()) return Promise.resolve();
+    if (backendStatusRequest) return backendStatusRequest;
+    if (backendStatusTimer) {
+      window.clearTimeout(backendStatusTimer);
+      backendStatusTimer = null;
     }
+
+    backendStatusRequest = (async function () {
+      setConnectionStatus('connecting', 'Checking AI service...');
+      try {
+        const health = await window.RishNovaApi.getHealth();
+        if (!health.ollama_available || health.status !== 'online') {
+          chat.setAvailableModels([]);
+          setConnectionStatus('offline', 'AI model unavailable');
+          renderModelMenus();
+          scheduleBackendStatusCheck(backendRetryDelay);
+          backendRetryDelay = Math.min(backendRetryDelay * 2, 60000);
+          return;
+        }
+        const response = await window.RishNovaApi.getAvailableModels();
+        const models = Array.isArray(response.models) ? response.models : [];
+        chat.setAvailableModels(models);
+        if (models.length) {
+          if (!models.some(function (model) { return model.name === state.selectedModel; })) {
+            state.selectedModel = models.some(function (model) { return model.name === response.default_model; })
+              ? response.default_model
+              : models[0].name;
+            persist();
+          }
+          setConnectionStatus('online', 'AI service connected');
+          backendRetryDelay = 2000;
+          scheduleBackendStatusCheck(60000);
+        } else {
+          setConnectionStatus('offline', 'Required AI model unavailable');
+          scheduleBackendStatusCheck(backendRetryDelay);
+          backendRetryDelay = Math.min(backendRetryDelay * 2, 60000);
+        }
+        renderModelMenus();
+      } catch (error) {
+        chat.setAvailableModels([]);
+        setConnectionStatus('offline', 'Backend or Ollama offline');
+        renderModelMenus();
+        console.error('Could not discover available AI models:', error);
+        scheduleBackendStatusCheck(backendRetryDelay);
+        backendRetryDelay = Math.min(backendRetryDelay * 2, 60000);
+      }
+    })();
+
+    return backendStatusRequest.finally(function () {
+      backendStatusRequest = null;
+    });
   }
 
   function closeMobileNavigation() {
@@ -401,17 +497,21 @@
   }
 
   async function selectConversation(id) {
+    const generation = workspaceGeneration;
+    const user = window.RishNovaAuth.getUser();
     const conversation = state.conversations.find(function (item) { return item.id === id; });
-    if (!conversation) return;
+    if (!conversation || !user) return;
     state.activeId = id;
     persist();
     renderTitle();
     renderConversations();
     try {
-      await loadConversationMessages(id);
+      await loadConversationMessages(id, generation, user.id);
     } catch (error) {
+      if (!isCurrentWorkspace(generation, user.id)) return;
       ui.showToast(error.message || 'Could not load conversation history.', 'error');
     }
+    if (!isCurrentWorkspace(generation, user.id) || !state.conversations.includes(conversation)) return;
     chat.renderMessages();
     chat.scrollToLatest();
     closeMobileNavigation();
@@ -460,6 +560,10 @@
   }
 
   async function submitMessage() {
+    if (workspaceLoading) {
+      ui.showToast('Please wait while your cloud workspace loads.', 'error');
+      return;
+    }
     const text = messageInput.value;
     if (!text.trim() && stagedFiles.length === 0) {
       ui.showToast('Write a message before sending.', 'error');
@@ -519,11 +623,7 @@
       const action = button.dataset.menuAction;
       closeConversationMenu();
       if (action === 'pin') {
-        conversation.pinned = !conversation.pinned;
-        persist();
-        saveConversationChanges(conversation, { pinned: conversation.pinned });
-        renderConversations();
-        ui.showToast(conversation.pinned ? 'Conversation pinned.' : 'Conversation unpinned.');
+        toggleConversationPin(conversation);
       } else if (action === 'rename') {
         renameConversation(conversation);
       } else if (action === 'delete') {
@@ -535,6 +635,25 @@
     menu.querySelector('button').focus();
   }
 
+  async function toggleConversationPin(conversation) {
+    const previousPinned = conversation.pinned;
+    conversation.pinned = !previousPinned;
+    renderConversations();
+    try {
+      const user = window.RishNovaAuth.getUser();
+      if (!user || !window.RishNovaStorage.updateConversationMetadata(user.id, conversation.id, { pinned: conversation.pinned })) {
+        throw new Error('Could not save this preference on this device.');
+      }
+      persist();
+      renderConversations();
+      ui.showToast(conversation.pinned ? 'Conversation pinned.' : 'Conversation unpinned.');
+    } catch (error) {
+      conversation.pinned = previousPinned;
+      renderConversations();
+      ui.showToast(error.message || 'Could not save the conversation.', 'error');
+    }
+  }
+
   async function renameConversation(conversation) {
     const title = await ui.openModal({
       title: 'Rename conversation',
@@ -544,19 +663,34 @@
       confirmText: 'Rename'
     });
     if (typeof title !== 'string') return;
-    conversation.title = title.slice(0, 80);
-    conversation.updatedAt = Date.now();
-    persist();
-    saveConversationChanges(conversation, { title: conversation.title });
+    const nextTitle = title.trim().slice(0, 80);
+    if (!nextTitle) {
+      ui.showToast('Enter a conversation name.', 'error');
+      return;
+    }
+    const previousTitle = conversation.title;
+    conversation.title = nextTitle;
     renderTitle();
     renderConversations();
-    ui.showToast('Conversation renamed.');
+    try {
+      const saved = await saveConversationChanges(conversation, { title: nextTitle });
+      conversation.title = saved.title;
+      persist();
+      renderTitle();
+      renderConversations();
+      ui.showToast('Conversation renamed.');
+    } catch (error) {
+      conversation.title = previousTitle;
+      renderTitle();
+      renderConversations();
+      ui.showToast(error.message || 'Could not rename the conversation.', 'error');
+    }
   }
 
   async function deleteConversation(conversation) {
     const confirmed = await ui.openModal({
       title: 'Delete conversation?',
-      description: '“' + conversation.title + '” and its messages will be removed from this device. This cannot be undone.',
+      description: '“' + conversation.title + '” and its cloud messages will be permanently deleted. This cannot be undone.',
       showInput: false,
       confirmText: 'Delete'
     });
@@ -570,6 +704,10 @@
       }
     }
     state.conversations = state.conversations.filter(function (item) { return item.id !== conversation.id; });
+    const user = window.RishNovaAuth.getUser();
+    if (user && !window.RishNovaStorage.removeConversationMetadata(user.id, conversation.id)) {
+      ui.showToast('The conversation was deleted, but its local pin/project preference could not be removed.', 'error');
+    }
     if (state.activeId === conversation.id) state.activeId = null;
     persist();
     renderAll();
@@ -804,7 +942,7 @@
     const verified = user.email_confirmed_at ? 'Verified' : 'Email verification pending';
     ui.openModal({
       title: name || 'Your RishNova account',
-      description: 'Email: ' + (user.email || 'Not available') + '\nUser ID: ' + user.id + '\nAccount status: ' + verified + '\n\nConversations are stored in your private account. Chat requests are sent to the RishNova FastAPI service and local Ollama model.',
+      description: 'Email: ' + (user.email || 'Not available') + '\nUser ID: ' + user.id + '\nAccount status: ' + verified + '\n\nConversations are stored in your private account. Chat requests are sent to the RishNova FastAPI service and its configured AI model.',
       showInput: false,
       confirmText: 'Done'
     });
@@ -833,11 +971,16 @@
   window.addEventListener('rishnova:connection', function (event) {
     if (event.detail && event.detail.status === 'offline') {
       setConnectionStatus('offline', 'Backend or Ollama offline');
+      scheduleBackendStatusCheck(backendRetryDelay);
     } else {
       refreshBackendStatus();
     }
   });
   window.addEventListener('focus', refreshBackendStatus);
+  window.addEventListener('online', function () {
+    backendRetryDelay = 2000;
+    refreshBackendStatus();
+  });
   window.addEventListener('rishnova:authenticated', enterWorkspace);
   window.addEventListener('rishnova:signedout', clearSignedOutWorkspace);
   window.addEventListener('rishnova:usage', function (event) {

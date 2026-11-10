@@ -7,3 +7,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+*.pyc
+logs/
+node_modules/
+.wrangler/
+.DS_Store

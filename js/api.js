@@ -2,9 +2,14 @@
   'use strict';
 
   const config = window.RISHNOVA_CONFIG || {};
-  const API_BASE = String(config.backendUrl || '').replace(/\/+$/, '') + '/api';
+  const API_BASE = config.backendUrl
+    ? String(config.backendUrl).replace(/\/+$/, '') + '/api'
+    : '/api';
 
   async function request(path, options) {
+    if (config.backendUrl && config.backendUrl.includes('YOUR_BACKEND_HOST')) {
+      throw new Error('The local API URL is not configured correctly.');
+    }
     const requestOptions = Object.assign({}, options || {});
     const headers = new Headers(requestOptions.headers || {});
     const token = window.RishNovaAuth && await window.RishNovaAuth.getAccessToken();
@@ -41,8 +46,16 @@
     return payload;
   }
 
-  function get(path) {
-    return request(path, { method: 'GET', cache: 'no-store' });
+  function get(path, timeoutMs) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(function () { controller.abort(); }, timeoutMs || 15000);
+    return request(path, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal
+    }).finally(function () {
+      window.clearTimeout(timeout);
+    });
   }
 
   function sendMessage(conversationId, messages, model, signal) {
@@ -55,8 +68,8 @@
 
   window.RishNovaApi = {
     sendMessage: sendMessage,
-    getHealth: function () { return get('/health'); },
-    getAvailableModels: function () { return get('/models'); },
+    getHealth: function () { return get('/health', 8000); },
+    getAvailableModels: function () { return get('/models', 12000); },
     getConversations: function () { return get('/conversations'); },
     createConversation: function (conversation) {
       return request('/conversations', { method: 'POST', body: JSON.stringify(conversation) });

@@ -1,13 +1,26 @@
 (function () {
   'use strict';
 
-  const STORAGE_KEY = 'rishnova-ai:v1';
+  const PREFERENCES_KEY = 'rishnova-ai:preferences:v1';
+  const LEGACY_STORAGE_KEY = 'rishnova-ai:v1';
+  const CONVERSATION_METADATA_KEY = 'rishnova-ai:conversation-metadata:v1';
 
   function makeId() {
     if (window.crypto && typeof window.crypto.randomUUID === 'function') {
       return window.crypto.randomUUID();
     }
-    return 'rn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 9);
+    if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+      const bytes = new Uint8Array(16);
+      window.crypto.getRandomValues(bytes);
+      bytes[6] = (bytes[6] & 15) | 64;
+      bytes[8] = (bytes[8] & 63) | 128;
+      return Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, '0'); }).join('')
+        .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
+    }
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (character) {
+      const random = Math.random() * 16 | 0;
+      return (character === 'x' ? random : (random & 3) | 8).toString(16);
+    });
   }
 
   function createInitialState() {
@@ -24,35 +37,11 @@
 
   function normalizeState(state) {
     if (!state || typeof state !== 'object') return createInitialState();
-    const conversations = Array.isArray(state.conversations) ? state.conversations.filter(function (conversation) {
-      return conversation && typeof conversation.id === 'string' && Array.isArray(conversation.messages);
-    }).map(function (conversation) {
-      return {
-        id: conversation.id,
-        title: typeof conversation.title === 'string' ? conversation.title : 'Untitled conversation',
-        createdAt: Number.isFinite(conversation.createdAt) ? conversation.createdAt : Date.now(),
-        updatedAt: Number.isFinite(conversation.updatedAt) ? conversation.updatedAt : Date.now(),
-        pinned: Boolean(conversation.pinned),
-        project: typeof conversation.project === 'string' ? conversation.project : null,
-        messages: conversation.messages.filter(function (message) {
-          return message && (message.role === 'user' || message.role === 'assistant') && typeof message.content === 'string';
-        }).map(function (message) {
-          return {
-            id: typeof message.id === 'string' ? message.id : makeId(),
-            role: message.role,
-            content: message.content,
-            createdAt: Number.isFinite(message.createdAt) ? message.createdAt : Date.now(),
-            attachments: Array.isArray(message.attachments) ? message.attachments.filter(function (name) { return typeof name === 'string'; }) : [],
-            feedback: message.feedback === 'like' || message.feedback === 'dislike' ? message.feedback : ''
-          };
-        })
-      };
-    }) : [];
     const projects = Array.isArray(state.projects) ? state.projects.filter(function (item) { return typeof item === 'string'; }) : [];
     return {
-      conversations: conversations,
+      conversations: [],
       projects: projects,
-      activeId: typeof state.activeId === 'string' && conversations.some(function (item) { return item.id === state.activeId; }) ? state.activeId : null,
+      activeId: null,
       currentProject: typeof state.currentProject === 'string' && projects.includes(state.currentProject) ? state.currentProject : null,
       selectedModel: ['qwen3.5:0.8b', 'qwen3.5:2b-q4_K_M'].includes(state.selectedModel) ? state.selectedModel : 'qwen3.5:0.8b',
       theme: state.theme === 'light' ? 'light' : 'dark',
@@ -61,35 +50,92 @@
   }
 
   let state;
-  let initializeStorage = true;
   try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      state = normalizeState(JSON.parse(saved));
-      initializeStorage = false;
-    } else {
-      state = createInitialState();
-    }
+    const saved = localStorage.getItem(PREFERENCES_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
+    state = saved ? normalizeState(JSON.parse(saved)) : createInitialState();
+    state.conversations = [];
+    state.activeId = null;
   } catch (error) {
-    console.error('RishNova could not load saved conversations:', error);
+    console.error('RishNova could not load saved preferences:', error);
     state = createInitialState();
   }
 
   function save() {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      localStorage.setItem(PREFERENCES_KEY, JSON.stringify({
+        projects: state.projects,
+        currentProject: state.currentProject,
+        selectedModel: state.selectedModel,
+        theme: state.theme,
+        sortNewestFirst: state.sortNewestFirst
+      }));
       return true;
     } catch (error) {
-      console.error('RishNova could not save conversations:', error);
+      console.error('RishNova could not save preferences:', error);
       return false;
     }
   }
 
-  if (initializeStorage) save();
+  function readConversationMetadata() {
+    try {
+      const saved = localStorage.getItem(CONVERSATION_METADATA_KEY);
+      if (!saved) return {};
+      const parsed = JSON.parse(saved);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (error) {
+      console.error('RishNova could not load conversation preferences:', error);
+      return {};
+    }
+  }
+
+  function getConversationMetadata(userId) {
+    if (typeof userId !== 'string' || !userId) return {};
+    const metadata = readConversationMetadata()[userId];
+    return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {};
+  }
+
+  function updateConversationMetadata(userId, conversationId, changes) {
+    if (typeof userId !== 'string' || !userId || typeof conversationId !== 'string' || !conversationId) return false;
+    const metadata = readConversationMetadata();
+    const userMetadata = metadata[userId] && typeof metadata[userId] === 'object'
+      ? metadata[userId]
+      : {};
+    const current = userMetadata[conversationId] && typeof userMetadata[conversationId] === 'object'
+      ? userMetadata[conversationId]
+      : {};
+    if (typeof changes.pinned === 'boolean') current.pinned = changes.pinned;
+    if (typeof changes.project === 'string' || changes.project === null) current.project = changes.project;
+    userMetadata[conversationId] = current;
+    metadata[userId] = userMetadata;
+    try {
+      localStorage.setItem(CONVERSATION_METADATA_KEY, JSON.stringify(metadata));
+      return true;
+    } catch (error) {
+      console.error('RishNova could not save conversation preferences:', error);
+      return false;
+    }
+  }
+
+  function removeConversationMetadata(userId, conversationId) {
+    if (typeof userId !== 'string' || !userId || typeof conversationId !== 'string' || !conversationId) return false;
+    const metadata = readConversationMetadata();
+    if (!metadata[userId] || !metadata[userId][conversationId]) return true;
+    delete metadata[userId][conversationId];
+    try {
+      localStorage.setItem(CONVERSATION_METADATA_KEY, JSON.stringify(metadata));
+      return true;
+    } catch (error) {
+      console.error('RishNova could not remove conversation preferences:', error);
+      return false;
+    }
+  }
 
   window.RishNovaStorage = {
     state: state,
     makeId: makeId,
-    save: save
+    save: save,
+    getConversationMetadata: getConversationMetadata,
+    updateConversationMetadata: updateConversationMetadata,
+    removeConversationMetadata: removeConversationMetadata
   };
 })();

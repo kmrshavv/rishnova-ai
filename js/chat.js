@@ -138,13 +138,15 @@
 
   async function requestReply(conversationId, messages, signal) {
     const model = selectedModel();
-    if (!model) throw new Error('No supported local model is installed. Install qwen3.5:0.8b with Ollama.');
-    return window.RishNovaApi.sendMessage(conversationId, messages, model.id, signal);
+    if (!model) throw new Error('No supported model is available from the AI service.');
+    const latest = messages[messages.length - 1];
+    if (!latest || latest.role !== 'user') throw new Error('A new user message is required.');
+    return window.RishNovaApi.sendMessage(conversationId, [latest], model.id, signal);
   }
 
   function persistOrNotify() {
     if (!window.RishNovaStorage.save()) {
-      window.RishNovaUI.showToast('Could not save changes on this device.', 'error');
+      window.RishNovaUI.showToast('Could not save your app preferences on this device.', 'error');
     }
   }
 
@@ -152,11 +154,13 @@
     const content = String(text || '').trim();
     if ((!content && (!attachments || !attachments.length)) || busy) return false;
     if (!selectedModel()) {
-      window.RishNovaUI.showToast('No supported local model is installed. Pull qwen3.5:0.8b with Ollama.', 'error');
+      window.RishNovaUI.showToast('No supported model is available from the AI service.', 'error');
       return false;
     }
     let conversation = getActiveConversation();
+    const isNewConversation = !conversation;
     if (!conversation) conversation = createConversation();
+    const messagesBeforeSend = conversation.messages.length;
     const userMessage = {
       id: window.RishNovaStorage.makeId(),
       role: 'user',
@@ -185,11 +189,16 @@
         await window.RishNovaApi.createConversation({
           id: conversation.id,
           title: conversation.title,
-          model: selectedModel().id,
-          pinned: conversation.pinned,
-          project: conversation.project
+          model: selectedModel().id
         });
         conversation.remote = true;
+        const user = window.RishNovaAuth.getUser();
+        if (user && !window.RishNovaStorage.updateConversationMetadata(user.id, conversation.id, {
+          pinned: conversation.pinned,
+          project: conversation.project
+        })) {
+          window.RishNovaUI.showToast('Your conversation is saved, but its pin/project preference could not be saved on this device.', 'error');
+        }
       }
       const history = requestHistory(conversation.messages);
       const result = await requestReply(conversation.id, history, activeController.signal);
@@ -208,13 +217,56 @@
       }
       window.dispatchEvent(new CustomEvent('rishnova:connection', { detail: { status: 'online' } }));
     } catch (error) {
+      let userMessageSaved = false;
+      let cloudHistoryChecked = false;
+      if (conversation.remote) {
+        try {
+          const response = await window.RishNovaApi.getMessages(conversation.id);
+          const savedMessages = response.messages.map(function (message) {
+            return {
+              id: message.id,
+              role: message.role,
+              content: message.content,
+              createdAt: Date.parse(message.created_at) || Date.now(),
+              attachments: [],
+              feedback: ''
+            };
+          });
+          cloudHistoryChecked = true;
+          const latest = savedMessages[savedMessages.length - 1];
+          userMessageSaved = savedMessages.length > messagesBeforeSend &&
+            latest && latest.role === 'user' && latest.content === userMessage.content;
+          conversation.messages = savedMessages;
+          conversation.loaded = true;
+        } catch (syncError) {
+          console.error('Could not reconcile chat state with cloud history:', syncError);
+        }
+      } else if (isNewConversation) {
+        state.conversations = state.conversations.filter(function (item) { return item.id !== conversation.id; });
+        if (state.activeId === conversation.id) state.activeId = null;
+      }
+      if (!userMessageSaved && !isNewConversation && !conversation.remote) {
+        conversation.messages = conversation.messages.filter(function (message) { return message.id !== userMessage.id; });
+      } else if (!userMessageSaved && conversation.remote) {
+        const latestLocalIndex = conversation.messages.findIndex(function (message) { return message.id === userMessage.id; });
+        if (latestLocalIndex >= 0 && conversation.loaded) conversation.messages.splice(latestLocalIndex, 1);
+      }
       if (error.name === 'AbortError') {
         window.RishNovaUI.showToast('Response generation stopped.');
       } else {
         console.error('RishNova chat request failed:', error);
         window.dispatchEvent(new CustomEvent('rishnova:connection', { detail: { status: 'offline' } }));
-        window.RishNovaUI.showToast(error.message || 'The response could not be generated. Please try again.', 'error');
+        const detail = error.message || 'The response could not be generated. Please try again.';
+        window.RishNovaUI.showToast(
+          userMessageSaved
+            ? 'Your message is saved in cloud history, but AI could not reply: ' + detail
+            : detail + (cloudHistoryChecked
+              ? ' Your message was not saved; it remains in the composer so you can retry.'
+              : ' Cloud save status could not be confirmed. Your text remains in the composer; reload the conversation before retrying.'),
+          'error'
+        );
       }
+      return userMessageSaved;
     } finally {
       generatingId = null;
       busy = false;
@@ -348,7 +400,7 @@
         MODEL_OPTIONS.push({
           id: model.name,
           name: model.display_name,
-          detail: 'Installed locally',
+          detail: 'Available on the AI server',
           icon: 'cpu'
         });
       });
@@ -361,6 +413,16 @@
     copyText: copyText,
     scrollToLatest: scrollToLatest,
     selectedModel: selectedModel,
+    clearSensitiveState: function () {
+      if (activeController) activeController.abort();
+      activeController = null;
+      generatingId = null;
+      busy = false;
+      sendButton.disabled = false;
+      sendButton.hidden = false;
+      stopButton.hidden = true;
+      renderMessages();
+    },
     isBusy: function () { return busy; }
   };
 })();

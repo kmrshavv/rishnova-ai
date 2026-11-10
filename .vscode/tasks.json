@@ -1,0 +1,49 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Start FastAPI backend",
+			"type": "shell",
+			"command": "backend\\venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"uvicorn",
+				"backend.main:app",
+				"--host",
+				"127.0.0.1",
+				"--port",
+				"8000",
+				"--workers",
+				"1"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Start local frontend",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"-m",
+				"http.server",
+				"5500",
+				"--bind",
+				"127.0.0.1"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Start Cloudflare backend tunnel",
+			"type": "shell",
+			"command": "C:\\Program Files (x86)\\cloudflared\\cloudflared.exe",
+			"args": [
+				"tunnel",
+				"--url",
+				"http://127.0.0.1:8000"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

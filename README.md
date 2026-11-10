@@ -1,13 +1,16 @@
-<<<<<<< HEAD
-# rishnova-ai
-=======
-# RishNova AI — beta deployment
+# RishNova AI — deployment
 
-RishNova keeps the existing vanilla HTML/CSS/JavaScript chat interface and uses
-Supabase Auth, Supabase Postgres with Row Level Security (RLS), FastAPI, and a
-local Ollama model. The intended beta path is:
+RishNova uses the existing vanilla HTML/CSS/JavaScript chat interface,
+Supabase Auth, Supabase Postgres with Row Level Security (RLS), FastAPI, and
+Ollama. The production architecture is:
 
-`Browser (Cloudflare Pages) → FastAPI (Cloudflare Quick Tunnel) → local Ollama`
+`Browser (Cloudflare Pages) → Pages Function (/api proxy) → Cloudflare Tunnel → FastAPI → loopback Ollama`
+
+For the Oracle Cloud Ubuntu ARM64 setup, systemd services, named Tunnel, Pages
+environment binding, backup, and recovery instructions, see
+[CLOUD_DEPLOYMENT.md](./CLOUD_DEPLOYMENT.md). The Windows instructions below
+are for local development and optional temporary beta testing; they do not
+keep production AI online.
 
 Supabase handles account authentication and database storage. The browser only
 contains the Supabase **publishable/anon key**; FastAPI never uses a service-role
@@ -15,20 +18,21 @@ key and independently verifies Supabase access-token signatures before serving
 private API routes. Database requests carry the user's verified token so
 Postgres RLS is applied.
 
-## What this deployment is — and is not
+## Architecture and security notes
 
 - Cloudflare Pages can host the static frontend on a free `*.pages.dev`
   hostname. No custom domain is needed.
-- A **Quick Tunnel is temporary beta connectivity, not permanent backend
-  hosting**. Its random hostname can change, and it stops when `cloudflared` or
-  the laptop stops. After a hostname change, update `js/config.js` and redeploy
-  the Pages site.
+- A stable named Cloudflare Tunnel requires a DNS domain managed in Cloudflare;
+  the `.pages.dev` hostname itself cannot provide a tunnel DNS route. A Quick
+  Tunnel is temporary and should not be used as the production API address.
+- Production API requests use the same-origin Pages `/api` Function. Set its
+  `BACKEND_API_URL` runtime variable to the HTTPS API origin; deployments do
+  not require editing browser source to change backend hosts.
 - Ollama and FastAPI bind to loopback. Ollama must not be exposed or port
   forwarded to the public internet.
-- The Ryzen 5 5500U / 8 GB laptop is a single-user-scale inference host. Requests
-  are serialized, use a 2,048-token context and at most 256 generated tokens,
-  and unload the model after each response. Expect slow responses and downtime
-  while the laptop sleeps, reboots, or loses internet.
+- The backend serializes inference, uses a 2,048-token context and at most 256
+  generated tokens, and keeps the single configured model loaded until Ollama
+  stops. Performance depends on the host's available memory and CPU.
 - Rate limits and the admin-adjustable limits are **in-memory, per backend
   process**. They reset when FastAPI restarts and are not a durable quota or a
   substitute for production abuse protection. Use a durable shared limiter,
@@ -39,24 +43,27 @@ Postgres RLS is applied.
 
 ## 1. Prepare Supabase
 
-1. Create a Supabase project and keep its database password private.
-2. In **SQL Editor**, run these migrations in order:
-   [`supabase/migrations/202611100001_initial_schema.sql`](./supabase/migrations/202611100001_initial_schema.sql)
-   and [`supabase/migrations/202611100002_profile_rls_without_definer.sql`](./supabase/migrations/202611100002_profile_rls_without_definer.sql).
-   They create `profiles`, `conversations`, and `messages`, enable RLS, and
-   remove the legacy profile trigger. Profiles are created by the authenticated
-   browser using a narrowly-scoped `auth.uid() = id` insert policy; there is no
-   `SECURITY DEFINER` function.
-3. In **Authentication → URL Configuration**, set **Site URL** to your deployed
-   Pages URL. During local development, set it to `http://127.0.0.1:5500`.
+1. Keep the existing Supabase database password private.
+2. The `profiles`, `conversations`, and `messages` tables already exist in this
+   project. Do not rerun the initial table-creation migrations against this
+   database. Confirm each table has RLS enabled and the ownership policies
+   described in the existing migrations.
+3. In **SQL Editor**, run
+   [`supabase/migrations/202611100003_private_user_uploads.sql`](./supabase/migrations/202611100003_private_user_uploads.sql)
+   once to prepare the private `rishnova-private-uploads` bucket. This does not
+   create or alter the three application tables.
+4. In **Authentication → URL Configuration**, set **Site URL** to
+   `https://rishnova-ai.pages.dev`. During local development, set it to
+   `http://127.0.0.1:5500`.
    Add these **Redirect URLs**:
+   - `https://rishnova-ai.pages.dev/index.html`
+   - `https://rishnova-ai.pages.dev/**`
    - `http://127.0.0.1:5500/index.html` (the exact local confirmation callback)
    - `http://127.0.0.1:5500/**`
    - `http://localhost:5500/**`
-   - `https://YOUR-PROJECT.pages.dev/**` (replace with your actual Pages URL)
-   The frontend explicitly sends `http://127.0.0.1:5500/index.html` for signup
-   confirmation and resend requests. Do not use `localhost:3000` or open the
-   app as a `file://` URL. If email links still land on the wrong host, check
+   The frontend builds signup, confirmation, resend, and recovery callbacks
+   from the current origin. Do not use `localhost:3000` or open the app as a
+   `file://` URL. If email links still land on the wrong host, check
    the confirmation email template uses Supabase's `{{ .ConfirmationURL }}` and
    that the requested redirect URL is present in the allowlist. Keep email
    confirmation enabled.
@@ -65,10 +72,9 @@ Postgres RLS is applied.
    that targets `http://localhost:3000`, either run a local server on port 3000
    before opening it, or request a fresh confirmation link after configuring
    the new callback. Prefer the fresh link.
-   Before production deployment, change `authRedirectUrl` in
-   [`js/config.js`](./js/config.js) to
-   `https://YOUR-PROJECT.pages.dev/index.html` and allowlist that URL.
-4. In **Authentication → Providers → Email**, enable email/password sign-in and
+   The auth callback is generated from the current site origin, so production
+   signup and recovery links use the Pages hostname rather than a localhost URL.
+5. In **Authentication → Providers → Email**, enable email/password sign-in and
    turn on email confirmation. Keep the confirmation and password recovery email
    templates enabled; their links must honor the requested redirect URL.
    Supabase returning success from `resend()` means the request was accepted,
@@ -77,23 +83,34 @@ Postgres RLS is applied.
    custom SMTP provider under **Project Settings → Authentication → SMTP
    Settings**. Avoid repeatedly clicking resend; provider rate limits can
    suppress further messages.
-5. The configured project URL and public **publishable key** are in
+6. The configured project URL and public **publishable key** are in
    [`js/config.js`](./js/config.js). The publishable key is intended for browser
    use. Never put a secret/service-role key or database password in frontend
    code or `.env`.
-6. For backend JWT validation, use an asymmetric Supabase Auth signing key
+7. For backend JWT validation, use an asymmetric Supabase Auth signing key
    (ES256, ES384, RS256, or EdDSA). If the project still issues legacy HS256
    tokens, FastAPI verifies them by calling Supabase Auth's `/auth/v1/user`
    endpoint; it never decodes HS256 tokens without verification.
 
-The migrations limit profile inserts to the signed-in user's `id`, and limit
-profile updates to `full_name` and `avatar_url`. Conversation/message policies
-and foreign keys prevent cross-user data access.
+The backend sends each request to Supabase PostgREST with the signed-in user's
+verified access token; the backend derives `user_id` from that verified token,
+never from a browser-supplied owner ID. RLS and the composite message foreign
+key enforce ownership. Conversation rows and messages are read from and written
+to Postgres; LocalStorage is limited to interface preferences. Existing
+`rishnova-ai:v1` browser data is left untouched as a legacy backup and is not
+automatically imported because it has no trustworthy account ownership marker.
 
-## 2. Configure and run on Windows 11
+## 2. Configure and run locally on Windows 11
 
-Install Ollama and Cloudflare `cloudflared` on the laptop. In PowerShell, from
-the project folder:
+For automatic Windows startup, a named Cloudflare Tunnel, operational checks,
+and safe removal, see the [self-hosted cloud server guide](./CLOUD_SERVER_SETUP.md).
+
+For the cloud-hosted production deployment, follow
+[CLOUD_DEPLOYMENT.md](./CLOUD_DEPLOYMENT.md). These Windows steps run a local
+development API and Ollama; they are not required for public AI chat once the
+cloud backend is configured.
+
+Install Ollama on the laptop. In PowerShell, from the project folder:
 
 ```powershell
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
@@ -104,22 +121,25 @@ ollama list
 ```
 
 The Supabase URL, JWKS endpoint, and public publishable key are already filled
-in the example. Set the Pages-site URL and admin email. The publishable key is
-public and may be committed in the example; do not put secret keys here. Set
-`RISHNOVA_CORS_ORIGINS` to the exact
-Pages origin, for example `https://your-project.pages.dev` (no path or trailing
-slash). Keep `RISHNOVA_ALLOWED_MODELS=qwen3.5:0.8b` for the default beta model.
-The backend rejects non-loopback `OLLAMA_HOST` values.
+in the example. Set the admin email. The publishable key is public and may be
+committed in the example; do not put secret keys here. `CORS_ALLOWED_ORIGINS`
+includes the Pages origin and loopback development origins; on the cloud VM,
+allow only `https://rishnova-ai.pages.dev`. Keep
+`RISHNOVA_ALLOWED_MODELS=qwen3.5:0.8b` for the default beta model.
+The backend rejects non-loopback `OLLAMA_URL` values.
 
-[`js/config.js`](./js/config.js) is already configured for the supplied Supabase
-project and its public publishable key. Only update `backendUrl` when switching
-between local FastAPI and the current Quick Tunnel URL.
+The production frontend is hosted at `https://rishnova-ai.pages.dev`. It needs
+no frontend build command. Its Supabase publishable key and environment-aware
+auth redirect are configured in [`js/config.js`](./js/config.js); the Pages
+Function forwards production `/api` requests to the `BACKEND_API_URL` set in
+Cloudflare. Local hosts use `http://127.0.0.1:8000`. Never configure the
+production Pages variable to point to localhost.
 [`js/supabase.js`](./js/supabase.js) creates one client with persistent
 sessions, automatic refresh, and URL callback detection. The publishable key is
 expected to be visible in browser code. Do **not** put a Supabase secret key,
 service-role key, or database password in frontend files.
 
-Open three PowerShell terminals in the project folder:
+Open two PowerShell terminals in the project folder:
 
 **Terminal 1 — Ollama:** launch the Ollama Windows application (it normally
 starts its local service). Confirm `ollama list` shows `qwen3.5:0.8b`. If the
@@ -130,20 +150,6 @@ service is not running, start `ollama serve` in this terminal.
 ```powershell
 backend\venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
-
-**Terminal 3 — public beta tunnel:**
-
-```powershell
-cloudflared tunnel --url http://127.0.0.1:8000
-```
-
-Copy the `https://....trycloudflare.com` hostname printed by `cloudflared` into
-`backendUrl` in `js/config.js`, then deploy that change to Pages. FastAPI's CORS
-origin remains the **Pages site URL**, not the tunnel URL. The shipped
-`_headers` CSP permits Quick Tunnel hostnames; if using another backend
-hostname, add that exact HTTPS origin to its `connect-src` directive. Do not
-bind FastAPI or Ollama to `0.0.0.0`, create router port forwards, or publish
-port 11434.
 
 For local frontend testing, open this folder in VS Code and use the Live Server
 extension. The workspace settings bind it to `127.0.0.1:5500`; install
@@ -156,52 +162,75 @@ extension. The workspace settings bind it to `127.0.0.1:5500`; install
 python -m http.server 5500 --bind 127.0.0.1
 ```
 
-Open `http://127.0.0.1:5500/index.html`. Temporarily set `.env`'s
-`RISHNOVA_CORS_ORIGINS=http://127.0.0.1:5500,http://localhost:5500` and `FRONTEND_URL` to that same
-origin, then restart FastAPI. `js/config.js` is configured for the supplied
-Supabase project and local API by default.
+Open `http://127.0.0.1:5500/index.html`. Keep the loopback frontend origins in
+`CORS_ALLOWED_ORIGINS` for local testing, then restart FastAPI after changing
+the environment. `js/config.js` selects the local API only on localhost and
+127.0.0.1.
 
 ## 3. Publish through GitHub and Cloudflare Pages
 
-1. Create a private or public GitHub repository. From the project folder:
+1. The source repository is `https://github.com/kmrshavv/rishnova-ai.git`.
+   From the project folder, review and push the intended changes:
 
    ```powershell
-   git init
-   git add .
+   git status --short
+   git add .env.example .gitignore README.md CLOUD_DEPLOYMENT.md js backend tests supabase functions index.html _headers assets css
    git status --short
    ```
 
-   Confirm `.env`, `venv`, and `backend/venv` are absent from the staged files.
-   Then connect and push to your empty GitHub repository:
+   Confirm `.env`, `venv`, `backend/venv`, and `.wrangler` are absent from the
+   staged files. Then commit and push to the configured `origin`:
 
    ```powershell
-   git commit -m "Prepare RishNova beta deployment"
-   git branch -M main
-   git remote add origin https://github.com/YOUR_ACCOUNT/YOUR_REPOSITORY.git
+   git commit -m "Configure RishNova production deployment"
    git push -u origin main
    ```
 
-   Do not commit credentials.
+   Do not commit credentials. `.env.example` contains only the public Supabase
+   publishable key and backend configuration defaults.
 2. In Cloudflare, choose **Workers & Pages → Create → Pages → Connect to Git**,
    authorize the repository, and configure:
    - Production branch: your default branch
    - Framework preset: **None**
    - Build command: leave empty
    - Build output directory: `/` (repository root)
-3. Deploy. The site uses the `https://<project>.pages.dev` hostname. Add that
-   exact hostname to `.env` as `FRONTEND_URL` and
-   `RISHNOVA_CORS_ORIGINS`, restart FastAPI, and add it to Supabase's allowed
-   redirect URLs and site URL.
-4. Confirm the configured Supabase URL/public key and set the current tunnel
-   URL in `js/config.js`, commit, and push. Cloudflare Pages redeploys the static site.
+3. Set `CORS_ALLOWED_ORIGINS=https://rishnova-ai.pages.dev` on the cloud
+   backend, and add the production hostname to Supabase's allowed redirect
+   URLs and Site URL.
+4. Set the Pages production runtime variable `BACKEND_API_URL` to the HTTPS
+   origin for the Cloudflare Tunnel (for example `https://api.example.com`).
+   Deploy the repository with its `functions/` directory so `/api` requests
+   are proxied to that origin.
    The Supabase browser key is public; no backend secrets belong in Pages
    assets.
-5. Test signup, confirmation email, login, reset email, and logout from the
-   deployed HTTPS hostname. A temporary tunnel hostname change requires another
-   `js/config.js` update and Pages deployment.
+5. Test signup, confirmation email, login, reset email, logout, authenticated
+   chat, and conversation history from the deployed HTTPS hostname. A tunnel
+   origin change requires updating the Pages variable and redeploying, not
+   editing `js/config.js`.
 
-GitHub Pages is not needed; Cloudflare Pages serves the static site. The Python
-backend is not deployed to Pages and stays on the laptop during this beta.
+GitHub Pages is not needed; Cloudflare Pages serves the static site. FastAPI
+and Ollama run on the cloud VM for production and may also run on a developer's
+computer for local development.
+
+## Cloud conversation behavior
+
+- On authenticated startup, the backend fetches this user's profile,
+  conversations, messages, and usage with the current Supabase access token.
+- New conversations are created in Postgres before chat generation. FastAPI
+  saves each user message and successful AI response; conversation activity
+  updates `updated_at`. Rename and delete use owner-filtered backend endpoints.
+  The existing Supabase `conversations` table has no `pinned` or `project`
+  columns, so those interface preferences are stored locally per authenticated
+  user and do not sync across devices.
+- Conversation content is no longer written to LocalStorage. Only UI
+  preferences are stored locally. Old `rishnova-ai:v1` data is retained as a
+  local backup but is not automatically imported, because the old format did
+  not record a trusted account owner.
+- `window.RishNovaUploads` provides authenticated, private upload, signed-URL,
+  and delete helpers for PDF/JPEG/PNG/WebP files up to 10 MB. The private
+  Storage bucket and `storage.objects` RLS policies must be installed with the
+  migration above before calling these helpers. The current attachment UI does
+  not upload file contents yet.
 
 ## API and protections
 
@@ -227,7 +256,8 @@ backend is not deployed to Pages and stays on the laptop during this beta.
 
 ## Security test checklist
 
-After configuring a Supabase project and running both migrations:
+After configuring a Supabase project, verify the existing table/RLS setup, and
+run the private Storage migration:
 
 - [ ] Sign up, verify email, log in, reload (session persists), reset password,
       and log out.
@@ -237,6 +267,10 @@ After configuring a Supabase project and running both migrations:
 - [ ] Create two test users. Verify each only sees/updates/deletes its own
       profile, conversations, and messages; try the other user's UUID directly
       against the API and Supabase REST API.
+- [ ] Create, rename, load, and delete a conversation; refresh and sign in from
+      a second browser to verify the changes came from cloud Postgres.
+- [ ] Verify `rishnova-private-uploads` is private and a signed-in user can
+      access only objects beneath their own user-ID folder.
 - [ ] Confirm RLS is enabled on all three public tables and test the policies
       while authenticated as each test user.
 - [ ] Send invalid/oversize messages, an unapproved model, and enough requests
@@ -291,4 +325,3 @@ These local checks cannot verify your Supabase project, email delivery, RLS in
 that project, public tunnel, or actual Ollama inference without your configured
 services. Do not treat deployment as complete until the checklist's live
 integration checks pass.
->>>>>>> 9f42d7b (Prepare RishNova AI for deployment)

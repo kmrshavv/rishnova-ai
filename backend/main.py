@@ -38,16 +38,41 @@ def load_local_env() -> None:
 load_local_env()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", os.getenv("SUPABASE_ANON_KEY", ""))
+SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", os.getenv("SUPABASE_ANON_KEY", ""))
+SUPABASE_ANON_KEY = SUPABASE_PUBLISHABLE_KEY
 SUPABASE_JWKS_URL = os.getenv(
     "SUPABASE_JWKS_URL",
     f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json" if SUPABASE_URL else "",
 )
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
-if urlparse(OLLAMA_HOST).hostname not in {"127.0.0.1", "localhost", "::1"}:
-    raise RuntimeError("OLLAMA_HOST must point to a loopback address. Do not expose Ollama publicly.")
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen3.5:0.8b")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://127.0.0.1:5500").rstrip("/")
+SUPABASE_JWT_ISSUER = os.getenv("SUPABASE_JWT_ISSUER", "").rstrip("/")
+SUPABASE_JWT_AUDIENCE = os.getenv("SUPABASE_JWT_AUDIENCE", "authenticated").strip()
+OLLAMA_URL = os.getenv("OLLAMA_URL", os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")).rstrip("/")
+OLLAMA_URL_PARTS = urlparse(OLLAMA_URL)
+try:
+    OLLAMA_URL_PARTS.port
+except ValueError as error:
+    raise RuntimeError("OLLAMA_URL contains an invalid port.") from error
+if (
+    OLLAMA_URL_PARTS.scheme != "http"
+    or OLLAMA_URL_PARTS.hostname not in {"127.0.0.1", "localhost", "::1"}
+    or OLLAMA_URL_PARTS.path not in {"", "/"}
+    or OLLAMA_URL_PARTS.username
+    or OLLAMA_URL_PARTS.password
+    or OLLAMA_URL_PARTS.query
+    or OLLAMA_URL_PARTS.fragment
+):
+    raise RuntimeError("OLLAMA_URL must point to a loopback address. Do not expose Ollama publicly.")
+OLLAMA_HOST = OLLAMA_URL
+try:
+    OLLAMA_REQUEST_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_REQUEST_TIMEOUT_SECONDS", "180"))
+except ValueError as error:
+    raise RuntimeError("OLLAMA_REQUEST_TIMEOUT_SECONDS must be an integer.") from error
+if not 1 <= OLLAMA_REQUEST_TIMEOUT_SECONDS <= 900:
+    raise RuntimeError("OLLAMA_REQUEST_TIMEOUT_SECONDS must be between 1 and 900.")
+if not SUPABASE_JWT_AUDIENCE:
+    raise RuntimeError("SUPABASE_JWT_AUDIENCE must not be empty.")
+DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", os.getenv("DEFAULT_MODEL", "qwen3.5:0.8b"))
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://rishnova-ai.pages.dev").rstrip("/")
 MAX_REQUEST_BYTES = 48 * 1024
 MAX_MESSAGES = 24
 MAX_TOTAL_CHARS = 16_000
@@ -78,14 +103,43 @@ def bounded_environment_int(name: str, default: int, maximum: int) -> int:
     return value
 
 
+def configured_origins() -> tuple[str, ...]:
+    configured = os.getenv("CORS_ALLOWED_ORIGINS")
+    if configured is None:
+        configured = os.getenv("RISHNOVA_CORS_ORIGINS", FRONTEND_URL)
+    origins = tuple(dict.fromkeys(origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()))
+    if not origins:
+        raise RuntimeError("CORS_ALLOWED_ORIGINS must contain at least one approved origin.")
+    for origin in origins:
+        parsed = urlparse(origin)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or "*" in parsed.netloc
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or (parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"})
+        ):
+            raise RuntimeError("CORS_ALLOWED_ORIGINS must contain exact HTTPS origins and loopback-only HTTP origins.")
+        try:
+            parsed.port
+        except ValueError as error:
+            raise RuntimeError("CORS_ALLOWED_ORIGINS contains an invalid port.") from error
+    return origins
+
+
 ALLOWED_MODELS = configured_models()
 DEFAULT_USER_RPM = bounded_environment_int("RISHNOVA_USER_RPM", 6, 20)
 DEFAULT_DAILY_LIMIT = bounded_environment_int("RISHNOVA_DAILY_LIMIT", 40, 500)
-ALLOWED_ORIGINS = tuple(
-    origin.strip()
-    for origin in os.getenv("RISHNOVA_CORS_ORIGINS", FRONTEND_URL).split(",")
-    if origin.strip()
-)
+ALLOWED_ORIGINS = configured_origins()
+if os.getenv("RISHNOVA_PUBLIC_DEPLOYMENT") == "1":
+    if ALLOWED_ORIGINS != (FRONTEND_URL,):
+        raise RuntimeError("Public deployments must allow only the configured frontend origin.")
+    if ALLOWED_MODELS != ("qwen3.5:0.8b",):
+        raise RuntimeError("Public Windows deployments must allow only qwen3.5:0.8b.")
 ADMIN_EMAILS = {
     email.strip().lower()
     for email in os.getenv("RISHNOVA_ADMIN_EMAILS", "").split(",")
@@ -122,16 +176,12 @@ class ConversationCreate(BaseModel):
     id: UUID
     title: Annotated[str, StringConstraints(min_length=1, max_length=80)] = "New conversation"
     model: str = DEFAULT_MODEL
-    pinned: bool = False
-    project: Annotated[str, StringConstraints(max_length=40)] | None = None
 
 
 class ConversationUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: Annotated[str, StringConstraints(min_length=1, max_length=80)] | None = None
-    pinned: bool | None = None
-    project: Annotated[str, StringConstraints(max_length=40)] | None = None
 
 
 class ProfileUpdate(BaseModel):
@@ -148,18 +198,65 @@ class UsageLimitsUpdate(BaseModel):
     daily_limit: int = Field(ge=1, le=500)
 
 
+class RequestSizeLimitMiddleware:
+    def __init__(self, app, max_body_bytes: int):
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                continue
+            body.extend(message.get("body", b""))
+            if len(body) > self.max_body_bytes:
+                response_body = b'{"detail":"Request body is too large."}'
+                await send({
+                    "type": "http.response.start",
+                    "status": 413,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(response_body)).encode("ascii")),
+                        (b"cache-control", b"no-store"),
+                        (b"x-content-type-options", b"nosniff"),
+                    ],
+                })
+                await send({"type": "http.response.body", "body": response_body})
+                return
+            if not message.get("more_body", False):
+                break
+
+        delivered = False
+
+        async def replay_body():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay_body, send)
+
+
 def require_configuration() -> None:
-    if not SUPABASE_URL or not SUPABASE_ANON_KEY or not SUPABASE_JWKS_URL:
+    if not SUPABASE_URL or not SUPABASE_PUBLISHABLE_KEY or not SUPABASE_JWKS_URL:
         raise HTTPException(status_code=503, detail="Backend authentication is not configured.")
 
 
 def decode_token(token: str, signing_key: jwt.PyJWK) -> dict:
-    issuer = f"{SUPABASE_URL}/auth/v1"
+    issuer = SUPABASE_JWT_ISSUER or f"{SUPABASE_URL}/auth/v1"
     return jwt.decode(
         token,
         signing_key.key,
         algorithms=[signing_key.algorithm_name],
-        audience="authenticated",
+        audience=SUPABASE_JWT_AUDIENCE,
         issuer=issuer,
         options={"require": ["exp", "iat", "sub", "iss", "aud"]},
     )
@@ -350,7 +447,7 @@ def is_admin(user: dict) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.ollama = AsyncClient(host=OLLAMA_HOST, timeout=180)
+    app.state.ollama = AsyncClient(host=OLLAMA_URL, timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS)
     app.state.inference_lock = asyncio.Semaphore(1)
     app.state.jwks = []
     app.state.jwks_expires = 0.0
@@ -377,6 +474,43 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+app.add_middleware(RequestSizeLimitMiddleware, max_body_bytes=MAX_REQUEST_BYTES)
+
+
+def add_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    return response
+
+
+@app.middleware("http")
+async def security_and_size_headers(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BYTES:
+                return add_security_headers(
+                    JSONResponse(status_code=413, content={"detail": "Request body is too large."})
+                )
+        except ValueError:
+            return add_security_headers(
+                JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header."})
+            )
+    if request.url.path in {"/health", "/health/ready", "/api/health", "/api/health/ready"} and request.method == "GET":
+        events = request.app.state.health_events[client_ip(request)]
+        now = time.monotonic()
+        while events and events[0] <= now - 60:
+            events.popleft()
+        if len(events) >= 30:
+            return JSONResponse(status_code=429, content={"detail": "Health checks are temporarily rate limited."})
+        events.append(now)
+    response = await call_next(request)
+    return add_security_headers(response)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(ALLOWED_ORIGINS),
@@ -386,55 +520,62 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def security_and_size_headers(request: Request, call_next):
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            if int(content_length) > MAX_REQUEST_BYTES:
-                return JSONResponse(status_code=413, content={"detail": "Request body is too large."})
-        except ValueError:
-            return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header."})
-    if request.url.path == "/api/health" and request.method == "GET":
-        events = request.app.state.health_events[client_ip(request)]
-        now = time.monotonic()
-        while events and events[0] <= now - 60:
-            events.popleft()
-        if len(events) >= 30:
-            return JSONResponse(status_code=429, content={"detail": "Health checks are temporarily rate limited."})
-        events.append(now)
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
-    return response
+async def installed_ollama_models(request: Request) -> set[str]:
+    timeout = min(10, OLLAMA_REQUEST_TIMEOUT_SECONDS)
+    async with asyncio.timeout(timeout):
+        result = await request.app.state.ollama.list()
+    return {item.model for item in result.models}
+
+
+@app.get("/health")
+@app.get("/api/health/live", include_in_schema=False)
+async def liveness():
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+@app.get("/api/health/ready", include_in_schema=False)
+async def readiness(request: Request):
+    try:
+        installed = await installed_ollama_models(request)
+    except Exception as error:
+        logger.info("Readiness check failed: %s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="The AI service is not ready.")
+    if DEFAULT_MODEL not in installed:
+        raise HTTPException(status_code=503, detail="The AI service is not ready.")
+    return {"status": "ready"}
 
 
 @app.get("/api/health")
 async def health(request: Request):
     try:
-        installed = {item.model for item in (await request.app.state.ollama.list()).models}
+        installed = await installed_ollama_models(request)
         models = [name for name in ALLOWED_MODELS if name in installed]
         return {
             "status": "online",
             "ollama_available": True,
+            "model_available": DEFAULT_MODEL in installed,
             "default_model": DEFAULT_MODEL,
             "available_models": models,
         }
     except Exception as error:
         logger.info("Ollama health check failed: %s", type(error).__name__)
-        return {"status": "offline", "ollama_available": False, "default_model": DEFAULT_MODEL, "available_models": []}
+        return {
+            "status": "offline",
+            "ollama_available": False,
+            "model_available": False,
+            "default_model": DEFAULT_MODEL,
+            "available_models": [],
+        }
 
 
 @app.get("/api/models", dependencies=[Depends(verified_user)])
 async def available_models(request: Request):
     try:
-        installed = {item.model for item in (await request.app.state.ollama.list()).models}
+        installed = await installed_ollama_models(request)
     except Exception as error:
         logger.info("Ollama model listing failed: %s", type(error).__name__)
-        raise HTTPException(status_code=503, detail="Ollama is unavailable. Start the local Ollama service and retry.")
+        raise HTTPException(status_code=503, detail="The AI service is unavailable. Please try again later.")
     return {
         "models": [
             {"name": name, "display_name": SUPPORTED_MODELS[name]}
@@ -485,7 +626,7 @@ async def list_conversations(user: CurrentUser):
         user,
         "GET",
         "conversations",
-        params={"select": "id,user_id,title,model,pinned,project,created_at,updated_at", "order": "updated_at.desc"},
+        params={"select": "id,user_id,title,model,created_at,updated_at", "order": "updated_at.desc"},
     )
     return {"conversations": rows or []}
 
@@ -500,7 +641,7 @@ async def create_conversation(payload: ConversationCreate, user: CurrentUser):
         params={
             "id": f"eq.{payload.id}",
             "user_id": f"eq.{user['id']}",
-            "select": "id,user_id,title,model,pinned,project,created_at,updated_at",
+            "select": "id,user_id,title,model,created_at,updated_at",
             "limit": "1",
         },
     )
@@ -510,14 +651,12 @@ async def create_conversation(payload: ConversationCreate, user: CurrentUser):
         user,
         "POST",
         "conversations",
-        params={"select": "id,user_id,title,model,pinned,project,created_at,updated_at"},
+        params={"select": "id,user_id,title,model,created_at,updated_at"},
         body={
             "id": str(payload.id),
             "user_id": user["id"],
             "title": payload.title.strip() or "New conversation",
             "model": payload.model,
-            "pinned": payload.pinned,
-            "project": payload.project,
         },
         prefer="return=representation",
     )
@@ -541,7 +680,7 @@ async def update_conversation(conversation_id: UUID, payload: ConversationUpdate
         params={
             "id": f"eq.{conversation_id}",
             "user_id": f"eq.{user['id']}",
-            "select": "id,user_id,title,model,pinned,project,created_at,updated_at",
+            "select": "id,user_id,title,model,created_at,updated_at",
         },
         body=changes,
         prefer="return=representation",
@@ -553,6 +692,19 @@ async def update_conversation(conversation_id: UUID, payload: ConversationUpdate
 
 @app.get("/api/conversations/{conversation_id}/messages")
 async def get_messages(conversation_id: UUID, user: CurrentUser):
+    existing = await database_request(
+        user,
+        "GET",
+        "conversations",
+        params={
+            "id": f"eq.{conversation_id}",
+            "user_id": f"eq.{user['id']}",
+            "select": "id",
+            "limit": "1",
+        },
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
     rows = await database_request(
         user,
         "GET",
@@ -570,6 +722,19 @@ async def get_messages(conversation_id: UUID, user: CurrentUser):
 
 @app.delete("/api/conversations/{conversation_id}", status_code=204)
 async def delete_conversation(conversation_id: UUID, user: CurrentUser):
+    existing = await database_request(
+        user,
+        "GET",
+        "conversations",
+        params={
+            "id": f"eq.{conversation_id}",
+            "user_id": f"eq.{user['id']}",
+            "select": "id",
+            "limit": "1",
+        },
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
     await database_request(
         user,
         "DELETE",
@@ -626,14 +791,25 @@ async def chat(payload: ChatRequest, request: Request, user: CurrentUser):
             },
             prefer="return=minimal",
         )
+        await database_request(
+            user,
+            "PATCH",
+            "conversations",
+            params={
+                "id": f"eq.{payload.conversation_id}",
+                "user_id": f"eq.{user['id']}",
+            },
+            body={"updated_at": datetime.now(timezone.utc).isoformat()},
+            prefer="return=minimal",
+        )
     except HTTPException:
         raise
 
     try:
-        installed = {item.model for item in (await request.app.state.ollama.list()).models}
+        installed = await installed_ollama_models(request)
     except Exception as error:
         logger.info("Ollama unavailable during chat: %s", type(error).__name__)
-        raise HTTPException(status_code=503, detail="Ollama is unavailable. Start Ollama and try again.")
+        raise HTTPException(status_code=503, detail="The AI service is unavailable. Please try again later.")
     if payload.model not in installed:
         raise HTTPException(status_code=404, detail=f"{payload.model} is not installed. Run `ollama pull {payload.model}`.")
     try:
@@ -647,7 +823,7 @@ async def chat(payload: ChatRequest, request: Request, user: CurrentUser):
             messages=history,
             options={"num_ctx": 2048, "num_predict": 256, "num_batch": 64, "num_thread": 4, "temperature": 0.7},
             think=False,
-            keep_alive=0,
+            keep_alive=-1,
         )
     except ResponseError as error:
         logger.warning("Ollama returned HTTP %s.", error.status_code)
