@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#09090f">
+  <meta name="description" content="RishNova AI — Think Smarter. Build Beyond.">
+  <title>RishNova AI — Think Smarter. Build Beyond.</title>
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main class="auth-screen" id="auth-screen">
+    <section class="auth-card" aria-labelledby="auth-title">
+      <a class="auth-brand" href="#" aria-label="RishNova AI">
+        <img src="assets/logo.svg" alt="">
+        <span><strong>RishNova</strong><small>AI STUDIO</small></span>
+      </a>
+      <p class="eyebrow"><span class="eyebrow-line"></span> YOUR THOUGHT PARTNER <span class="eyebrow-line"></span></p>
+      <h1 id="auth-title">Welcome back</h1>
+      <p class="auth-description" id="auth-description"></p>
+      <form id="auth-form">
+        <label id="auth-name-field" hidden>Full name<input id="auth-name" name="name" autocomplete="name" maxlength="100"></label>
+        <label id="auth-email-field">Email address<input id="auth-email" name="email" type="email" autocomplete="email" required maxlength="254"></label>
+        <label>Password<input id="auth-password" name="password" type="password" autocomplete="current-password" required minlength="8" maxlength="128"></label>
+        <label id="auth-password-confirm-field" hidden>Confirm password<input id="auth-password-confirm" name="password-confirm" type="password" autocomplete="new-password" minlength="8" maxlength="128"></label>
+        <button class="primary-button auth-submit" id="auth-submit" type="submit">Sign in</button>
+      </form>
+      <p class="auth-notice" id="auth-notice" role="status" hidden></p>
+      <button class="auth-text-button" id="auth-resend" type="button" hidden>Resend confirmation email</button>
+      <button class="auth-text-button" id="auth-continue" type="button" hidden>Continue to RishNova AI</button>
+      <button class="auth-text-button" id="auth-forgot" type="button">Forgot password?</button>
+      <button class="auth-text-button" id="auth-toggle" type="button"></button>
+      <button class="auth-text-button" id="auth-back" type="button" hidden>Back to sign in</button>
+      <p class="auth-footnote">Your account is protected by Supabase authentication. Conversations are private to your account.</p>
+    </section>
+  </main>
+  <div class="app-shell" id="app-shell" hidden>
+    <div class="mobile-scrim" id="mobile-scrim"></div>
+    <aside class="sidebar" id="sidebar" aria-label="Main navigation">
+      <div class="sidebar-top">
+        <a class="brand" href="#" aria-label="RishNova AI home">
+          <span class="brand-mark"><img src="assets/logo.svg" alt=""></span>
+          <span class="brand-copy"><strong>RishNova</strong><small>AI STUDIO</small></span>
+        </a>
+        <button class="icon-button sidebar-collapse" id="collapse-sidebar" aria-label="Collapse sidebar" title="Collapse sidebar"><i data-lucide="panel-left-close"></i></button>
+      </div>
+      <button class="new-chat-button" id="new-chat"><i data-lucide="plus"></i><span>New conversation</span><kbd>⌘ K</kbd></button>
+      <label class="search-box">
+        <i data-lucide="search"></i>
+        <input id="conversation-search" type="search" placeholder="Search conversations" aria-label="Search conversations">
+        <kbd>/</kbd>
+      </label>
+      <nav class="sidebar-nav">
+        <div class="nav-label">WORKSPACE</div>
+        <button class="nav-link" id="pinned-filter"><i data-lucide="pin"></i><span>Pinned</span><span class="nav-count" id="pinned-count">0</span></button>
+        <div class="section-heading"><span>RECENT</span><button class="tiny-icon-button" id="sort-conversations" aria-label="Sort conversations" title="Sort conversations"><i data-lucide="arrow-down-wide-narrow"></i></button></div>
+        <div class="conversation-list" id="conversation-list"></div>
+        <div class="section-heading projects-heading"><span>PROJECTS</span><button class="tiny-icon-button" id="add-project" aria-label="Create project" title="Create project"><i data-lucide="plus"></i></button></div>
+        <div class="project-list" id="project-list"></div>
+      </nav>
+      <div class="sidebar-bottom">
+        <button class="nav-link" id="open-settings"><i data-lucide="settings-2"></i><span>Settings</span></button>
+        <div class="profile-card">
+          <span class="avatar user-avatar" id="profile-avatar">R</span>
+          <span class="profile-copy"><strong id="profile-name">Your account</strong><small id="profile-email">Personal workspace</small></span>
+          <button class="tiny-icon-button" id="profile-menu" aria-label="Profile options"><i data-lucide="more-horizontal"></i></button>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-button mobile-menu-button" id="open-sidebar" aria-label="Open navigation"><i data-lucide="menu"></i></button>
+          <button class="icon-button desktop-open-button" id="expand-sidebar" aria-label="Expand sidebar" title="Expand sidebar"><i data-lucide="panel-left-open"></i></button>
+          <div class="conversation-heading">
+            <span class="conversation-title" id="current-title">New conversation</span>
+            <span class="title-meta"><span class="status-dot connection-dot connecting" id="connection-dot"></span><span id="connection-label">Checking local AI...</span></span>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <button class="icon-button" id="top-new-chat" aria-label="Start a new conversation" title="New conversation"><i data-lucide="plus"></i></button>
+          <div class="model-picker" id="header-model-picker">
+            <button class="model-trigger" id="header-model-trigger" aria-haspopup="listbox" aria-expanded="false">
+              <span class="model-sparkle"><i data-lucide="cpu"></i></span>
+              <span id="header-model-name">Checking local models...</span>
+              <i class="model-chevron" data-lucide="chevron-down"></i>
+            </button>
+            <div class="model-menu" id="header-model-menu" role="listbox" aria-label="Choose model"></div>
+          </div>
+          <span class="action-divider"></span>
+          <button class="icon-button" id="share-chat" aria-label="Share conversation" title="Copy conversation"><i data-lucide="share-2"></i></button>
+          <button class="icon-button" id="export-chat" aria-label="Export conversation" title="Export as text"><i data-lucide="download"></i></button>
+          <button class="icon-button" id="theme-toggle" aria-label="Switch theme" title="Switch theme"><i data-lucide="sun-moon"></i></button>
+        </div>
+      </header>
+
+      <section class="chat-scroll" id="chat-scroll" aria-live="polite">
+        <div class="chat-content">
+          <section class="welcome-screen" id="welcome-screen">
+            <div class="welcome-orbit"><div class="orbit-core"><img src="assets/logo.svg" alt=""></div><span class="orbit-ring ring-one"></span><span class="orbit-ring ring-two"></span><span class="orbit-glow"></span></div>
+            <p class="eyebrow"><span class="eyebrow-line"></span> YOUR THOUGHT PARTNER <span class="eyebrow-line"></span></p>
+            <h1>Intelligence, <span>without boundaries.</span></h1>
+            <p class="welcome-subtitle">Your ideas deserve a smarter conversation.</p>
+            <div class="suggestion-grid">
+              <button class="suggestion-card" data-prompt="Help me write a compelling introduction for an idea I'm excited about.">
+                <span class="suggestion-icon violet"><i data-lucide="pen-line"></i></span><span class="suggestion-card-copy"><strong>Write &amp; Create</strong><small>Bring your next big idea to life</small></span><i class="suggestion-arrow" data-lucide="arrow-up-right"></i>
+              </button>
+              <button class="suggestion-card" data-prompt="Help me debug this code and explain the fix step by step.">
+                <span class="suggestion-icon blue"><i data-lucide="braces"></i></span><span class="suggestion-card-copy"><strong>Code &amp; Debug</strong><small>Build something brilliant</small></span><i class="suggestion-arrow" data-lucide="arrow-up-right"></i>
+              </button>
+              <button class="suggestion-card" data-prompt="Teach me a fascinating topic from first principles, with examples.">
+                <span class="suggestion-icon amber"><i data-lucide="telescope"></i></span><span class="suggestion-card-copy"><strong>Research &amp; Learn</strong><small>Follow your curiosity further</small></span><i class="suggestion-arrow" data-lucide="arrow-up-right"></i>
+              </button>
+              <button class="suggestion-card" data-prompt="Help me break down a complex problem into a clear, practical plan.">
+                <span class="suggestion-icon mint"><i data-lucide="chart-no-axes-combined"></i></span><span class="suggestion-card-copy"><strong>Analyze &amp; Solve</strong><small>Find clarity in complexity</small></span><i class="suggestion-arrow" data-lucide="arrow-up-right"></i>
+              </button>
+            </div>
+            <div class="welcome-footnote"><i data-lucide="shield-check"></i> Your conversations are private to your account.</div>
+          </section>
+          <div class="message-list" id="message-list"></div>
+          <div class="typing-indicator" id="typing-indicator" aria-label="RishNova is thinking" hidden>
+            <span class="avatar ai-avatar"><img src="assets/logo.svg" alt=""></span>
+            <div class="typing-bubble"><span></span><span></span><span></span><em>Thinking</em></div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="composer-area">
+        <div class="composer-shell" id="composer-shell">
+          <div class="attachment-preview" id="attachment-preview" hidden></div>
+          <textarea id="message-input" rows="1" maxlength="4000" placeholder="Message RishNova..." aria-label="Message RishNova AI"></textarea>
+          <div class="composer-toolbar">
+            <div class="composer-tools">
+              <button class="composer-tool" id="attach-file" aria-label="Attach a file" title="Attach a file"><i data-lucide="paperclip"></i></button>
+              <input id="file-input" type="file" hidden multiple>
+              <span class="tool-divider"></span>
+              <div class="model-picker composer-model-picker" id="composer-model-picker">
+                <button class="composer-model-trigger" id="composer-model-trigger" aria-haspopup="listbox" aria-expanded="false"><i data-lucide="cpu"></i><span id="composer-model-name">Checking local models...</span><i class="model-chevron" data-lucide="chevron-down"></i></button>
+                <div class="model-menu composer-model-menu" id="composer-model-menu" role="listbox" aria-label="Choose model"></div>
+              </div>
+            </div>
+            <div class="composer-actions">
+              <button class="composer-tool voice-button" id="voice-input" aria-label="Start voice input" title="Voice input"><i data-lucide="mic"></i></button>
+              <button class="send-button stop-button" id="stop-generation" aria-label="Stop generation" title="Stop generation" hidden><i data-lucide="square"></i></button>
+              <button class="send-button" id="send-message" aria-label="Send message" title="Send message"><i data-lucide="arrow-up"></i></button>
+            </div>
+          </div>
+        </div>
+        <p class="composer-disclaimer"><span class="service-indicator connecting" id="service-indicator"></span><span id="service-label">Connecting to local AI</span> <span class="disclaimer-separator">·</span><span id="usage-indicator">Daily usage is limited</span> <span class="disclaimer-separator">·</span> <kbd>Enter</kbd> to send</p>
+      </footer>
+    </main>
+  </div>
+  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <div class="modal-backdrop" id="modal-backdrop" hidden>
+    <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-heading"><span class="modal-icon"><i data-lucide="sparkles"></i></span><button class="icon-button" id="close-modal" aria-label="Close dialog"><i data-lucide="x"></i></button></div>
+      <h2 id="modal-title"></h2><p id="modal-description"></p>
+      <input class="modal-input" id="modal-input">
+      <div class="modal-actions"><button class="secondary-button" id="cancel-modal">Cancel</button><button class="primary-button" id="confirm-modal">Save changes</button></div>
+    </section>
+  </div>
+  <input id="import-input" type="file" accept=".txt,text/plain" hidden>
+
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/supabase.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/storage.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/chat.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
