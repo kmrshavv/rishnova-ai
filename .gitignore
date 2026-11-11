@@ -9,6 +9,7 @@ __pycache__/
 .ruff_cache/
 *.pyc
 logs/
+dist/
 node_modules/
 .wrangler/
 .DS_Store
