@@ -36,6 +36,11 @@ mkdir -p -- "${dist_dir}"
 cp -- "${repo_root}/index.html" "${repo_root}/_headers" "${dist_dir}/"
 cp -R -- "${repo_root}/assets" "${repo_root}/css" "${repo_root}/js" "${dist_dir}/"
 
+if ! grep -Fq "connect-src 'self' https://*.supabase.co https://*.trycloudflare.com" "${dist_dir}/_headers"; then
+  printf 'Pages CSP must allow Supabase and the configured Quick Tunnel API.\n' >&2
+  exit 1
+fi
+
 runtime_script_line="$(grep -nF '<script src="js/runtime-config.js"></script>' "${dist_dir}/index.html" | cut -d: -f1)"
 config_script_line="$(grep -nF '<script src="js/config.js"></script>' "${dist_dir}/index.html" | cut -d: -f1)"
 if [[ -z "${runtime_script_line}" || -z "${config_script_line}" || "${runtime_script_line}" -ge "${config_script_line}" ]]; then
